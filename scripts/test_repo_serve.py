@@ -132,6 +132,53 @@ class TestNormalizeAllowlist(unittest.TestCase):
                 server.shutdown()
                 server.server_close()
 
+    def test_loopback_defaults_and_static_secret_blocking(self):
+        import http.client
+        import threading
+        from http.server import ThreadingHTTPServer
+        from grill_flow_serve import SERVE_BIND, local_http_hosts, make_handler, build_repo_allowlist
+        self.assertEqual(SERVE_BIND, "127.0.0.1")
+        self.assertEqual(local_http_hosts(), frozenset({"127.0.0.1", "localhost", "::1", "[::1]"}))
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td) / "repo"
+            run = Path(td) / "run"
+            root.mkdir(); run.mkdir()
+            (run / "index.html").write_text("<html><head></head><body>ok</body></html>\n")
+            (run / "server-info.json").write_text('{"instanceId":"tok","pid":123}\n')
+            (run / ".lock").write_text('{"token":"secret-lock"}\n')
+            (run / "packets" / "out").mkdir(parents=True)
+            (run / "packets" / "out" / "p.json").write_text("{}\n")
+            (run / "obligations.json").write_text("[]\n")
+            (run / "graph.json").write_text('{"nodes":{},"edges":[]}\n')
+            (run / "ledger.json").write_text("{}\n")
+            allow = build_repo_allowlist(run)
+            Handler = make_handler(run, root.resolve(), "tok", allow)
+            server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+            port = server.server_address[1]
+            threading.Thread(target=server.serve_forever, daemon=True).start()
+            try:
+                def get(path, host="127.0.0.1"):
+                    c = http.client.HTTPConnection("127.0.0.1", port, timeout=5)
+                    c.putrequest("GET", path, skip_host=True, skip_accept_encoding=True)
+                    c.putheader("Host", host)
+                    c.endheaders()
+                    r = c.getresponse()
+                    return r.status, r.read().decode(errors="ignore")
+                st, _ = get("/server-info.json")
+                self.assertEqual(st, 403)
+                st, _ = get("/.lock")
+                self.assertEqual(st, 403)
+                st, _ = get("/packets/out/p.json")
+                self.assertEqual(st, 403)
+                st, _ = get("/graph.json", host="evil-rebind.com")
+                self.assertEqual(st, 403)
+                st, html = get("/")
+                self.assertEqual(st, 200)
+                self.assertIn('<meta name="grill-flow-instance" content="tok">', html)
+            finally:
+                server.shutdown()
+                server.server_close()
+
     def test_handler_symlink_escape(self):
         import http.client
         import threading

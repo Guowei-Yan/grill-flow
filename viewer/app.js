@@ -1411,6 +1411,23 @@
     const drill = document.getElementById("delete-drill-in");
     if (drill) drill.setAttribute("data-ready", "1");
 
+    const instMeta = document.querySelector('meta[name="grill-flow-instance"]');
+    let urlTok = "";
+    try {
+      const q = new URLSearchParams(globalThis.location ? globalThis.location.search : "");
+      const h = new URLSearchParams(
+        globalThis.location && globalThis.location.hash
+          ? globalThis.location.hash.replace(/^#/, "")
+          : ""
+      );
+      urlTok = q.get("t") || h.get("t") || "";
+    } catch (e) {
+      urlTok = "";
+    }
+    const resolvedTok =
+      urlTok || (instMeta && instMeta.getAttribute("content")) || "";
+    serverInfo = resolvedTok ? { instanceId: resolvedTok } : null;
+
     let jsonError = false;
     try {
       const parts = await Promise.all([
@@ -1429,16 +1446,12 @@
         fetch("surface.json").then(function (r) {
           return r.ok ? r.json() : null;
         }),
-        fetch("server-info.json").then(function (r) {
-          return r.ok ? r.json() : null;
-        }),
       ]);
       graph = parts[0];
       ledger = parts[1];
       obligations = parts[2];
       run = parts[3];
       surface = parts[4];
-      serverInfo = parts[5];
     } catch (e) {
       jsonError = true;
       const banner = document.getElementById("run-status-banner");

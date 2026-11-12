@@ -246,7 +246,7 @@ class TestServe(unittest.TestCase):
     def test_serve_start_info_argv_and_lock_release(self):
         import time
         from grill_flow_lock import read_lock
-        from grill_flow_serve import _pid_alive, serve_start, serve_stop
+        from grill_flow_serve import _cmdline_args, _pid_alive, serve_start, serve_stop
         helper = Path(__file__).resolve().parent / "grill-flow.py"
         with tempfile.TemporaryDirectory() as td:
             root = Path(td)
@@ -264,15 +264,12 @@ class TestServe(unittest.TestCase):
                 deadline = time.time() + 2.0
                 cmdline = []
                 while time.time() < deadline:
-                    try:
-                        raw = Path(f"/proc/{info['pid']}/cmdline").read_bytes().split(b"\0")
-                        cmdline = [x.decode(errors="ignore") for x in raw if x]
-                        if cmdline:
-                            break
-                    except OSError:
-                        time.sleep(0.05)
+                    cmdline = _cmdline_args(info["pid"])
+                    if cmdline:
+                        break
+                    time.sleep(0.05)
                 self.assertTrue(cmdline)
-                self.assertEqual(cmdline[0], str(helper))
+                self.assertIn(str(helper), cmdline)
                 self.assertIn(f"--grill-flow-instance={info['instanceId']}", cmdline)
                 self.assertIn("--read-only", cmdline)
             finally:

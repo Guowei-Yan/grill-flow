@@ -396,7 +396,7 @@ unwaive, resume-graph, raise-budget, abort-run, render, serve-start, serve-stop
 begin-flows always required; graph clean does not auto-start flows; graphPartial sticky ⇒ never complete; freeze complete|aborted blocks pack/merge/inbox-put; inbox-clear and check-surface still allowed.
 
 ## Viewer
-`render` emits a read-only graph-first map browser by **copying** skill `viewer/{model.js,app.js,style.css}` into the run dir (never hand-author those files inside a run). `serve-http` hosts the run dir statically and adds read-only `GET /repo/<relpath>?start&end` (instance token + Host allowlist including loopback and this machine’s IPv4; bind `0.0.0.0`) for line snippets; `/repo` is additive and never writes.
+`render` emits a read-only graph-first map browser by **copying** skill `viewer/{model.js,app.js,style.css}` into the run dir (never hand-author those files inside a run). `serve-http` hosts the run dir statically on loopback (`127.0.0.1` by default; optional `--bind`), blocks internal lock/token files, and adds read-only `GET /repo/<relpath>?start&end` (instance token + Host allowlist) for line snippets; `/repo` is additive and never writes.
 Viewer path: `viewer_dir_for_helper`: if helper.parent.name == "scripts" → helper.parent.parent/viewer; else helper.parent/viewer
 
 ### Flow detail (inspector) — required behaviour

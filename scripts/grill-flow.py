@@ -162,9 +162,11 @@ def build_parser():
     sub.add_parser("render")
     p_ss = sub.add_parser("serve-start")
     p_ss.add_argument("--port", type=int, default=0)
+    p_ss.add_argument("--bind", default="127.0.0.1")
     sub.add_parser("serve-stop")
     p_sh = sub.add_parser("serve-http")
     p_sh.add_argument("--port", type=int, required=True)
+    p_sh.add_argument("--bind", default="127.0.0.1")
     return p
 
 def _require_run_dir(args) -> Path:
@@ -859,6 +861,7 @@ def main(argv=None) -> int:
                 helper,
                 repo_root=Path(args.repo_root),
                 port=args.port if args.port else None,
+                bind=str(args.bind),
             )
             print(json.dumps(out))
             return 0
@@ -880,6 +883,7 @@ def main(argv=None) -> int:
             repo_root=Path(args.repo_root).resolve(),
             instance_id=str(args.grill_flow_instance),
             read_only=bool(args.read_only),
+            bind=str(args.bind),
         )
         return 0
     die("invalid_args", f"unsupported cmd {args.cmd}")

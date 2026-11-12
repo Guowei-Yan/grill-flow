@@ -1,4 +1,4 @@
-import json, sys, tempfile, unittest
+import json, subprocess, sys, tempfile, unittest
 from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
@@ -33,12 +33,30 @@ class TestLock(unittest.TestCase):
                 lock.acquire_exclusive(rd, force_token="wrong", helper_basename="grill-flow.py", is_live=lambda p, b: True)
             with self.assertRaises(SystemExit):
                 lock.acquire_exclusive(rd, force_token=None, helper_basename="grill-flow.py", is_live=lambda p, b: True)
-    def test_non_linux_unsupported(self):
-        import json, grill_flow_lock as lock
+    def test_darwin_posix_fallback_live_and_stale(self):
+        import os, grill_flow_lock as lock
+        from unittest.mock import patch
+        with tempfile.TemporaryDirectory() as td:
+            rd = Path(td)
+            (rd / ".lock").write_text(json.dumps({"pid": 99999999, "startedAt": "t", "token": "stale"}))
+            with patch("sys.platform", "darwin"):
+                rec = lock.acquire_exclusive(rd, force_token=None, helper_basename="grill-flow.py")
+                self.assertNotEqual(rec["token"], "stale")
+            fake_ps = subprocess.CompletedProcess(
+                args=["ps"], returncode=0, stdout="S+ /usr/bin/python3 /tmp/grill-flow.py status\n", stderr=""
+            )
+            (rd / ".lock").write_text(json.dumps({"pid": os.getpid(), "startedAt": "t", "token": "live-tok"}))
+            with patch("sys.platform", "darwin"), patch("subprocess.run", return_value=fake_ps):
+                with self.assertRaises(SystemExit):
+                    lock.acquire_exclusive(rd, force_token=None, helper_basename="grill-flow.py")
+                rec2 = lock.acquire_exclusive(rd, force_token="live-tok", helper_basename="grill-flow.py")
+                self.assertNotEqual(rec2["token"], "live-tok")
+    def test_non_posix_unsupported(self):
+        import grill_flow_lock as lock
         from io import StringIO
         from unittest.mock import patch
         with tempfile.TemporaryDirectory() as td:
-            with patch("sys.platform", "darwin"):
+            with patch("sys.platform", "win32"):
                 with patch("sys.stderr", new_callable=StringIO) as se:
                     with self.assertRaises(SystemExit):
                         lock.acquire_exclusive(Path(td), force_token=None, helper_basename="grill-flow.py")

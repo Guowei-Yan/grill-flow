@@ -2,6 +2,7 @@ import json
 import os
 import posixpath
 import secrets
+import shlex
 import signal
 import socket
 import subprocess
@@ -9,7 +10,7 @@ import sys
 import time
 from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-from urllib.parse import unquote
+from urllib.parse import parse_qs, unquote, urlparse
 from grill_flow_errors import die
 
 SERVE_START_REQUIRES_EXCLUSIVE_LOCK = True
@@ -19,6 +20,11 @@ SERVE_CHILD_READ_ONLY = True
 REPO_MAX_LINES = 500
 REPO_MAX_BYTES = 256 * 1024
 REPO_SCAN_GUARD = 2_000_000
+
+SERVE_BIND = "127.0.0.1"
+LOOPBACK_HOSTS = frozenset({"127.0.0.1", "localhost", "::1", "[::1]"})
+LOOPBACK_ADDRS = frozenset({"127.0.0.1", "::1", "::ffff:127.0.0.1"})
+
 
 def normalize_repo_relpath(raw: str) -> str | None:
     if raw is None:
@@ -34,6 +40,7 @@ def normalize_repo_relpath(raw: str) -> str | None:
     if n.startswith("./"):
         n = n[2:]
     return n or None
+
 
 def build_repo_allowlist(run_dir: Path) -> set[str]:
     out: set[str] = set()
@@ -64,6 +71,7 @@ def build_repo_allowlist(run_dir: Path) -> set[str]:
                 if p:
                     out.add(p)
     return out
+
 
 def read_repo_slice(file_path: Path, start: int, end: int) -> tuple[str | None, str | None]:
     if not isinstance(start, int) or not isinstance(end, int) or start < 1 or end < 1 or start > end:
@@ -99,11 +107,14 @@ def read_repo_slice(file_path: Path, start: int, end: int) -> tuple[str | None, 
     except OSError:
         return None, "io"
 
+
 def _json_bytes(obj: dict) -> bytes:
     return json.dumps(obj, separators=(",", ":")).encode("utf-8")
 
+
 def server_info_path(run_dir: Path) -> Path:
     return run_dir / "server-info.json"
+
 
 def read_server_info(run_dir: Path):
     p = server_info_path(run_dir)
@@ -111,22 +122,41 @@ def read_server_info(run_dir: Path):
         return None
     return json.loads(p.read_text())
 
+
 def write_server_info(run_dir: Path, info: dict) -> None:
     server_info_path(run_dir).write_text(json.dumps(info, indent=2, sort_keys=True) + "\n")
+
 
 def clear_server_info(run_dir: Path) -> None:
     p = server_info_path(run_dir)
     if p.is_file():
         p.unlink()
 
-def pick_free_port() -> int:
+
+def pick_free_port(bind: str = SERVE_BIND) -> int:
+    bind_addr = "127.0.0.1" if bind in ("", "localhost") else bind
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
-        s.bind(("127.0.0.1", 0))
+        s.bind((bind_addr, 0))
         return int(s.getsockname()[1])
 
-def local_http_hosts() -> frozenset[str]:
-    """Hosts allowed for /repo (loopback + this machine's IPv4 addrs — WSL/Windows)."""
-    hosts = {"127.0.0.1", "localhost"}
+
+def _extract_host(raw_host: str | None) -> str:
+    if not raw_host:
+        return ""
+    h = raw_host.strip().lower()
+    if h.startswith("["):
+        end = h.find("]")
+        return h[: end + 1] if end != -1 else h
+    return h.split(":", 1)[0]
+
+
+def local_http_hosts(bind: str = SERVE_BIND) -> frozenset[str]:
+    """Hosts allowed for HTTP requests (strictly loopback unless non-loopback bind is requested)."""
+    if bind in ("127.0.0.1", "localhost", "::1", "[::1]"):
+        return LOOPBACK_HOSTS
+    hosts = set(LOOPBACK_HOSTS)
+    if bind and bind != "0.0.0.0":
+        hosts.add(bind.lower())
     try:
         for res in socket.getaddrinfo(socket.gethostname(), None, socket.AF_INET):
             hosts.add(res[4][0])
@@ -140,7 +170,6 @@ def local_http_hosts() -> frozenset[str]:
         pass
     return frozenset(hosts)
 
-SERVE_BIND = "0.0.0.0"
 
 def build_serve_child_argv(
     helper: Path,
@@ -149,9 +178,10 @@ def build_serve_child_argv(
     run_dir: Path,
     instance_id: str,
     port: int,
+    bind: str = SERVE_BIND,
 ) -> list:
     helper_s = str(helper)
-    return [
+    argv = [
         helper_s,
         helper_s,
         "--repo-root", str(repo_root),
@@ -161,26 +191,80 @@ def build_serve_child_argv(
         "serve-http",
         "--port", str(port),
     ]
+    if bind != SERVE_BIND:
+        argv.extend(["--bind", bind])
+    return argv
+
 
 def _pid_alive(pid: int) -> bool:
-    status_path = Path(f"/proc/{pid}/status")
-    if not status_path.is_file():
+    if not isinstance(pid, int) or pid <= 0:
         return False
+    if sys.platform.startswith("linux") and Path("/proc").is_dir():
+        status_path = Path(f"/proc/{pid}/status")
+        if not status_path.is_file():
+            return False
+        try:
+            for line in status_path.read_text().splitlines():
+                if line.startswith("State:"):
+                    return not line.split()[1].startswith("Z")
+        except OSError:
+            return False
+        return True
     try:
-        for line in status_path.read_text().splitlines():
-            if line.startswith("State:"):
-                return not line.split()[1].startswith("Z")
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        pass
     except OSError:
         return False
-    return True
+    try:
+        res = subprocess.run(
+            ["ps", "-p", str(pid), "-o", "stat="],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+    except OSError:
+        return False
+    stat = (res.stdout or "").strip()
+    if res.returncode != 0 or not stat:
+        return False
+    return not stat.startswith("Z")
+
 
 def _cmdline_args(pid: int) -> list:
-    raw = Path(f"/proc/{pid}/cmdline").read_bytes().split(b"\0")
-    return [x.decode(errors="ignore") for x in raw if x]
+    if not isinstance(pid, int) or pid <= 0:
+        return []
+    proc_cmd = Path(f"/proc/{pid}/cmdline")
+    if sys.platform.startswith("linux") and Path("/proc").is_dir():
+        try:
+            raw = proc_cmd.read_bytes().split(b"\0")
+            return [x.decode(errors="ignore") for x in raw if x]
+        except OSError:
+            return []
+    try:
+        res = subprocess.run(
+            ["ps", "-p", str(pid), "-o", "args="],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+    except OSError:
+        return []
+    line = (res.stdout or "").strip()
+    if res.returncode != 0 or not line:
+        return []
+    try:
+        return shlex.split(line)
+    except ValueError:
+        return line.split()
+
 
 def _has_instance_flag(pid: int, instance_id: str) -> bool:
     needle = f"--grill-flow-instance={instance_id}"
     return needle in _cmdline_args(pid)
+
 
 def serve_start(
     run_dir: Path,
@@ -188,17 +272,19 @@ def serve_start(
     *,
     repo_root: Path,
     port: int | None = None,
+    bind: str = SERVE_BIND,
     popen=subprocess.Popen,
 ) -> dict:
     instance_id = secrets.token_hex(8)
     if port is None or port == 0:
-        port = pick_free_port()
+        port = pick_free_port(bind)
     argv = build_serve_child_argv(
         helper,
         repo_root=repo_root,
         run_dir=run_dir,
         instance_id=instance_id,
         port=port,
+        bind=bind,
     )
     proc = popen(
         argv,
@@ -207,14 +293,18 @@ def serve_start(
         stderr=subprocess.DEVNULL,
         start_new_session=True,
     )
+    url_host = "127.0.0.1" if bind in ("0.0.0.0", "") else bind
     info = {
         "pid": proc.pid,
         "instanceId": instance_id,
         "port": port,
+        "bind": bind,
+        "url": f"http://{url_host}:{port}/#t={instance_id}",
         "readOnly": True,
     }
     write_server_info(run_dir, info)
     return info
+
 
 def serve_stop(run_dir: Path) -> dict:
     info = read_server_info(run_dir)
@@ -251,6 +341,7 @@ def serve_stop(run_dir: Path) -> dict:
         return {}
     die("serve_stop_mismatch", "live pid argv instance mismatch")
 
+
 class _ReadOnlyHandler(SimpleHTTPRequestHandler):
     def do_POST(self):
         self.send_error(405, "Method Not Allowed")
@@ -267,11 +358,35 @@ class _ReadOnlyHandler(SimpleHTTPRequestHandler):
     def log_message(self, format, *args):
         return
 
-def make_handler(run_dir: Path, repo_root: Path, instance_id: str, allowlist: set[str]) -> type[_ReadOnlyHandler]:
-    from urllib.parse import urlparse, parse_qs, unquote
+
+def _is_forbidden_static_path(raw_path: str) -> bool:
+    clean = unquote(raw_path or "")
+    if "\x00" in clean:
+        return True
+    segs = [s for s in clean.split("/") if s]
+    if any(s in (".", "..") or s.startswith(".") for s in segs):
+        return True
+    if segs and segs[0] in ("server-info.json", "packets"):
+        return True
+    return False
+
+
+def make_handler(
+    run_dir: Path,
+    repo_root: Path,
+    instance_id: str,
+    allowlist: set[str],
+    *,
+    bind: str = SERVE_BIND,
+) -> type[_ReadOnlyHandler]:
     root = repo_root.resolve()
+    run_root = run_dir.resolve()
+    allowed_hosts = local_http_hosts(bind)
 
     class Handler(_ReadOnlyHandler):
+        def __init__(self, *args, **kwargs):
+            super().__init__(*args, directory=str(run_root), **kwargs)
+
         def _send_json(self, status: int, obj: dict, body: bool = True) -> None:
             raw = _json_bytes(obj)
             self.send_response(status)
@@ -296,8 +411,8 @@ def make_handler(run_dir: Path, repo_root: Path, instance_id: str, allowlist: se
             if self.command not in ("GET", "HEAD"):
                 self._unavail(405, "method", body=body)
                 return True
-            host = (self.headers.get("Host") or "").split(":")[0].lower()
-            if host not in local_http_hosts():
+            host = _extract_host(self.headers.get("Host"))
+            if host not in allowed_hosts:
                 self._unavail(403, "host", body=body)
                 return True
             qs = parse_qs(parsed.query)
@@ -338,13 +453,48 @@ def make_handler(run_dir: Path, repo_root: Path, instance_id: str, allowlist: se
             self._send_json(200, {"path": rel, "start": start, "end": end, "text": text}, body=body)
             return True
 
+        def _guard_and_serve_static(self, body: bool) -> bool:
+            host = _extract_host(self.headers.get("Host"))
+            if host not in allowed_hosts:
+                self.send_error(403, "Forbidden")
+                return True
+            parsed = urlparse(self.path)
+            if _is_forbidden_static_path(parsed.path):
+                self.send_error(403, "Forbidden")
+                return True
+            if unquote(parsed.path) in ("", "/", "/index.html"):
+                idx = run_root / "index.html"
+                if idx.is_file():
+                    html = idx.read_text(encoding="utf-8")
+                    client_ip = (self.client_address[0] if self.client_address else "")
+                    if client_ip in LOOPBACK_ADDRS:
+                        meta = f'<meta name="grill-flow-instance" content="{instance_id}">\n'
+                        if "</head>" in html:
+                            html = html.replace("</head>", meta + "</head>", 1)
+                        else:
+                            html = meta + html
+                    raw = html.encode("utf-8")
+                    self.send_response(200)
+                    self.send_header("Content-Type", "text/html; charset=utf-8")
+                    self.send_header("Cache-Control", "no-store")
+                    self.send_header("Content-Length", str(len(raw)))
+                    self.end_headers()
+                    if body:
+                        self.wfile.write(raw)
+                    return True
+            return False
+
         def do_GET(self):
             if self._handle_repo(body=True):
+                return
+            if self._guard_and_serve_static(body=True):
                 return
             super().do_GET()
 
         def do_HEAD(self):
             if self._handle_repo(body=False):
+                return
+            if self._guard_and_serve_static(body=False):
                 return
             super().do_HEAD()
 
@@ -370,13 +520,22 @@ def make_handler(run_dir: Path, repo_root: Path, instance_id: str, allowlist: se
 
     return Handler
 
-def run_serve_http(run_dir: Path, *, port: int, repo_root: Path, instance_id: str, read_only: bool = True) -> None:
+
+def run_serve_http(
+    run_dir: Path,
+    *,
+    port: int,
+    repo_root: Path,
+    instance_id: str,
+    read_only: bool = True,
+    bind: str = SERVE_BIND,
+) -> None:
     if not read_only:
         die("invalid_args", "serve-http requires --read-only")
     root = repo_root.resolve()
     allow = build_repo_allowlist(run_dir)
     os.chdir(run_dir)
-    server = ThreadingHTTPServer((SERVE_BIND, port), make_handler(run_dir, root, instance_id, allow))
+    server = ThreadingHTTPServer((bind, port), make_handler(run_dir, root, instance_id, allow, bind=bind))
     try:
         server.serve_forever()
     finally:

@@ -39,7 +39,7 @@ Git Diff / File-Set Surface
 
 ## Key Engineering Properties
 
-- **Language-Agnostic & Zero External Dependencies**: Built strictly on the Python standard library and vanilla ES modules (`viewer/model.js`, `viewer/app.js`, `viewer/style.css`) — no fragile AST or `tree-sitter` native compilation required.
+- **Language-Agnostic & Zero External Dependencies**: Built strictly on the Python standard library and vanilla JavaScript (`viewer/model.js`, `viewer/app.js`, `viewer/style.css`) — no fragile AST or `tree-sitter` native compilation required.
 - **Exclusive Run-Dir Locking & Non-Blocking `status`**: Mutating subcommands acquire an exclusive lock with force-token recovery (`--force-lock`), while `status` inspects live state safely without blocking active runs.
 - **Automatic Drift Demotion**: `check-surface` and phase transitions verify file fingerprints; if tracked files change after a run reaches `complete`, the run automatically demotes to `in_progress` instead of serving stale flow maps.
 - **Hosted Web Explorer**: `render` emits a self-contained viewer bundle and `serve-start` launches a managed local HTTP server (`GET /repo` live line previews) with clean process-tree shutdown via `serve-stop`.
@@ -73,7 +73,7 @@ python3 scripts/grill-flow.py --repo-root . --run-dir ./flow-run serve-start --p
 ./sync-grill-flow.sh
 ```
 
-### Run the Test Suite (170 Tests)
+### Run the Test Suite (172 Tests)
 
 ```bash
 python3 -m unittest discover -s scripts -p 'test_*.py' -v

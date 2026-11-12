@@ -11,9 +11,24 @@ LOCAL_SHARE="${LOCAL_SHARE:-$HOME/.local/share/grill-flow}"
 [ -d "$SCRIPTS_SRC" ] || { echo "✗ scripts dir not found: $SCRIPTS_SRC" >&2; exit 1; }
 [ -d "$VIEWER_SRC" ] || { echo "✗ viewer dir not found: $VIEWER_SRC" >&2; exit 1; }
 
+PRIMARY_ROOTS=("$HOME/.claude" "$HOME/.codex")
+OPTIONAL_ROOTS=(
+  "$HOME/.agents"
+  "$HOME/.config/muse"
+  "$HOME/.gemini/config"
+  "$HOME/.pi/agent"
+  "$HOME/.zcode"
+  "$HOME/.kimicode"
+)
+ROOTS=("${PRIMARY_ROOTS[@]}")
+for opt_root in "${OPTIONAL_ROOTS[@]}"; do
+  if [ -d "$opt_root" ]; then
+    ROOTS+=("$opt_root")
+  fi
+done
+
 written=""
-for root in "$HOME/.claude" "$HOME/.codex" \
-  "$HOME/.config/muse" "$HOME/.gemini/config" "$HOME/.pi/agent" "$HOME/.zcode" "$HOME/.kimicode"; do
+for root in "${ROOTS[@]}"; do
   skills_dir="$root/skills"
   mkdir -p "$skills_dir"
   canon="$(cd "$skills_dir" && pwd -P)"
@@ -64,4 +79,4 @@ CURSOR_FRONTMATTER
 } > "$CURSOR"
 echo "✓ synced  $CURSOR"
 
-echo "Done — grill-flow synced (SKILL.md + scripts/ + viewer/) to Claude, Codex, zcode, kimicode, muse, antigravity, pi, Cursor (.mdc), and LOCAL_SHARE."
+echo "Done — grill-flow synced (SKILL.md + scripts/ + viewer/) to ${#ROOTS[@]} agent skill roots, Cursor (.mdc), and LOCAL_SHARE."
