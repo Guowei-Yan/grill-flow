@@ -2,7 +2,7 @@
 
 [![CI](https://github.com/Guowei-Yan/grill-flow/actions/workflows/ci.yml/badge.svg)](https://github.com/Guowei-Yan/grill-flow/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
-[![Python 3.10+](https://img.shields.io/badge/Python-3.10%2B-3776AB.svg)](#)
+[![Python 3.10+](https://img.shields.io/badge/Python-3.10%2B-3776AB.svg)](https://www.python.org/)
 
 Deterministic codebase component-graph and line-to-flow coverage mapper for Git diffs and file sets, featuring dual phase budgets, content-hash drift guards, validator return barriers, and an interactive hosted HTML/JS viewer (**zero third-party runtime dependencies**).
 
@@ -53,7 +53,7 @@ Git Diff / File-Set Surface
 ```bash
 # 1. Initialize surface from a Git diff (or --mode file-set)
 python3 scripts/grill-flow.py --repo-root . --run-dir ./flow-run \
-  init-surface --mode git-diff --base HEAD~1
+  init-surface --mode git-diff --base HEAD~1 --head HEAD
 
 # 2. Initialize run, inspect recommended gate, and apply dual-phase budgets
 python3 scripts/grill-flow.py --repo-root . --run-dir ./flow-run init-run
