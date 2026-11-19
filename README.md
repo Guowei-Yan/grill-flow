@@ -1,88 +1,42 @@
 # grill-flow
 
 [![CI](https://github.com/Guowei-Yan/grill-flow/actions/workflows/ci.yml/badge.svg)](https://github.com/Guowei-Yan/grill-flow/actions/workflows/ci.yml)
-[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
-[![Python 3.10+](https://img.shields.io/badge/Python-3.10%2B-3776AB.svg)](https://www.python.org/)
 
-Deterministic codebase component-graph and line-to-flow coverage mapper for Git diffs and file sets, featuring dual phase budgets, content-hash drift guards, validator return barriers, and an interactive hosted HTML/JS viewer (**zero third-party runtime dependencies**).
+Language-agnostic component-graph and line-to-flow coverage mapper for Git diffs and file sets, with a local vanilla-JS HTML explorer (`Python 3.10+`, MIT).
 
----
+High-level architecture diagrams skip line-level control flow, while raw unified diffs hide component boundaries. `grill-flow` coordinates two budgeted mapping phases so every changed line is either attributed to an end-to-end execution flow, explicitly classified/waived, or left visibly uncovered.
 
-## What It Solves
+## Pipeline
 
-Understanding an unfamiliar pull request or multi-module subsystem fails in two ways: high-level architecture diagrams omit line-level control flow, while raw unified diffs obscure cross-component boundaries. `grill-flow` coordinates fresh-context mapping waves against deterministic file/line ledgers so every in-scope line is either attributed to an explicit end-to-end execution flow, explicitly waived with rationale, or surfaced as uncovered.
+1. **Surface fingerprinting (`init-surface`, `check-surface`)**: snapshots a Git diff (optionally including dirty working-tree edits) or explicit file set using `SHA-256` digests and `git rev-parse` tree OIDs. If tracked files change after a run completes, the run automatically demotes back to `in_progress`.
+2. **Phase 1 — Component graph (`pack-graph` / `merge-graph`)**: builds and validates a component topology under `graphBudget`.
+3. **Phase 2 — Line-to-flow ledger (`pack-flows` / `merge-flows`)**: assigns line-range coverage obligations under `lineBudget`, enforcing a `0.40` singleton-rate ceiling on files with `>= 8` semantic lines.
+4. **Interactive explorer (`render`, `serve-start`, `serve-stop`)**: renders a standalone viewer bundle (`viewer/model.js`, `viewer/app.js`, `viewer/style.css`) and serves live `GET /repo` line slices on loopback (`127.0.0.1`) by default with constant-time instance-token checks, canonical path containment, and `os.killpg` process-group shutdown.
 
-```text
-Git Diff / File-Set Surface
-        │
-        ▼
-┌──────────────────────────────────────────────────────────────┐
-│ 1. Surface & Inventory (init-surface ─► recommend-gate)      │
-│    • Git-diff (+ optional dirty working tree) or file-set    │
-│    • SHA-256 / blob-OID surface fingerprinting               │
-├──────────────────────────────────────────────────────────────┤
-│ 2. Phase 1: Component Graph (pack-graph ─► merge-graph)      │
-│    • Bounded graph packets + independent validator pass      │
-│    • Controlled graphBudget waves                            │
-├──────────────────────────────────────────────────────────────┤
-│ 3. Phase 2: Line-to-Flow Ledger (pack-flows ─► merge-flows)  │
-│    • Line-range coverage obligations per file                │
-│    • Controlled lineBudget waves + explicit waive/unwaive    │
-├──────────────────────────────────────────────────────────────┤
-│ 4. Interactive Viewer (render ─► serve-start / serve-stop)   │
-│    • Coalesced member runs, flow prose sections, inspector   │
-│    • Local HTTP preview server with GET /repo source slices  │
-└──────────────────────────────────────────────────────────────┘
-```
+### Concurrency & Locking
 
----
+Mutating subcommands serialize lock acquisition with POSIX `fcntl.flock` on the run directory and atomically publish `.lock` via hard-link (`os.link`) from an `fsync`-ed temp file (with `--force-lock` recovery). Read-only `--read-only status` inspects run state directly without blocking writers.
 
-## Key Engineering Properties
-
-- **Language-Agnostic & Zero External Dependencies**: Built strictly on the Python standard library and vanilla JavaScript (`viewer/model.js`, `viewer/app.js`, `viewer/style.css`) — no fragile AST or `tree-sitter` native compilation required.
-- **Exclusive Run-Dir Locking & Non-Blocking `status`**: Mutating subcommands acquire an exclusive lock with force-token recovery (`--force-lock`), while `status` inspects live state safely without blocking active runs.
-- **Automatic Drift Demotion**: `check-surface` and phase transitions verify file fingerprints; if tracked files change after a run reaches `complete`, the run automatically demotes to `in_progress` instead of serving stale flow maps.
-- **Hosted Web Explorer**: `render` emits a self-contained viewer bundle and `serve-start` launches a managed local HTTP server (`GET /repo` live line previews) with clean process-tree shutdown via `serve-stop`.
-
----
-
-## Quickstart
-
-### CLI Workflow
+## CLI Quickstart
 
 ```bash
-# 1. Initialize surface from a Git diff (or --mode file-set)
 python3 scripts/grill-flow.py --repo-root . --run-dir ./flow-run \
   init-surface --mode git-diff --base HEAD~1 --head HEAD
-
-# 2. Initialize run, inspect recommended gate, and apply dual-phase budgets
 python3 scripts/grill-flow.py --repo-root . --run-dir ./flow-run init-run
 python3 scripts/grill-flow.py --repo-root . --run-dir ./flow-run recommend-gate
 python3 scripts/grill-flow.py --repo-root . --run-dir ./flow-run \
   apply-gate --N 2 --graph-budget 6 --line-budget 8
 
-# 3. Inspect run state or render & serve the interactive HTML viewer
 python3 scripts/grill-flow.py --repo-root . --run-dir ./flow-run --read-only status
 python3 scripts/grill-flow.py --repo-root . --run-dir ./flow-run render
 python3 scripts/grill-flow.py --repo-root . --run-dir ./flow-run serve-start --port 8765
 ```
 
-### Install as a Local Coding-Agent Skill
-
-```bash
-./sync-grill-flow.sh
-```
-
-### Run the Test Suite (172 Tests)
+## Tests & Skill Install
 
 ```bash
 python3 -m unittest discover -s scripts -p 'test_*.py' -v
+./sync-grill-flow.sh
 ```
 
-See [`SKILL.md`](SKILL.md) and [`docs/design-spec.md`](docs/design-spec.md) for the full subcommand state table, error codes, and viewer layout contracts.
-
----
-
-## License
-
-[MIT](LICENSE)
+See [`SKILL.md`](SKILL.md) and [`docs/design-spec.md`](docs/design-spec.md) for the subcommand state machine, error codes, and viewer contracts.

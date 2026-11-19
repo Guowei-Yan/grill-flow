@@ -175,11 +175,12 @@ def _require_run_dir(args) -> Path:
     return args.run_dir
 
 def _with_exclusive(args, run_dir: Path, fn):
-    acquire_exclusive(run_dir, force_token=args.force_lock)
+    rec = acquire_exclusive(run_dir, force_token=args.force_lock)
+    token = rec.get("token") if isinstance(rec, dict) else None
     try:
         return fn()
     finally:
-        release_exclusive(run_dir)
+        release_exclusive(run_dir, expected_token=token)
 
 def _embed_drift(args, run_dir: Path) -> None:
     if should_embed_drift(args.cmd):

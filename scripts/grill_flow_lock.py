@@ -1,3 +1,4 @@
+import hmac
 import json
 import os
 import secrets
@@ -5,6 +6,7 @@ import shlex
 import subprocess
 import sys
 import time
+from contextlib import contextmanager
 from pathlib import Path
 from grill_flow_errors import die
 
@@ -15,13 +17,56 @@ def read_lock(run_dir: Path):
     p = run_dir / ".lock"
     if not p.exists():
         return None
-    return json.loads(p.read_text())
+    try:
+        raw = p.read_text()
+    except OSError:
+        return None
+    if not raw.strip():
+        return None
+    try:
+        data = json.loads(raw)
+    except json.JSONDecodeError:
+        return None
+    if not isinstance(data, dict):
+        return None
+    return data
 
 
-def release_exclusive(run_dir: Path) -> None:
+@contextmanager
+def _dir_mutex(run_dir: Path):
+    import fcntl
+
+    fd = os.open(str(run_dir), os.O_RDONLY)
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX)
+        try:
+            yield
+        finally:
+            fcntl.flock(fd, fcntl.LOCK_UN)
+    finally:
+        os.close(fd)
+
+
+def release_exclusive(run_dir: Path, *, expected_token: str | None = None) -> None:
     p = run_dir / ".lock"
-    if p.exists():
-        p.unlink()
+    if not run_dir.is_dir():
+        return
+
+    def _unlink_if_owned() -> None:
+        if expected_token is not None:
+            current = read_lock(run_dir)
+            if current is None:
+                return
+            cur_tok = current.get("token")
+            if not (isinstance(cur_tok, str) and cur_tok and hmac.compare_digest(cur_tok, expected_token)):
+                return
+        p.unlink(missing_ok=True)
+
+    if sys.platform.startswith(SUPPORTED_PLATFORMS):
+        with _dir_mutex(run_dir):
+            _unlink_if_owned()
+    else:
+        _unlink_if_owned()
 
 
 def _default_is_live(pid: int, base: str) -> bool:
@@ -72,19 +117,58 @@ def _default_is_live(pid: int, base: str) -> bool:
     return any(Path(tok).name == base for tok in tokens if tok)
 
 
+def _atomic_publish_lock(run_dir: Path, lock_path: Path, payload: bytes) -> None:
+    tmp_path = run_dir / f".lock.{os.getpid()}.{secrets.token_hex(6)}.tmp"
+    fd = os.open(str(tmp_path), os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
+    try:
+        try:
+            view = memoryview(payload)
+            written = 0
+            while written < len(view):
+                written += os.write(fd, view[written:])
+            os.fsync(fd)
+        finally:
+            os.close(fd)
+        os.link(str(tmp_path), str(lock_path))
+    finally:
+        try:
+            os.unlink(str(tmp_path))
+        except FileNotFoundError:
+            pass
+
+
 def acquire_exclusive(run_dir: Path, *, force_token=None, helper_basename="grill-flow.py", is_live=None):
     if not sys.platform.startswith(SUPPORTED_PLATFORMS):
         die("unsupported_platform", "lock requires POSIX (Linux or macOS/BSD)")
     run_dir.mkdir(parents=True, exist_ok=True)
     if is_live is None:
         is_live = _default_is_live
-    existing = read_lock(run_dir)
-    if existing:
-        live = is_live(existing["pid"], helper_basename)
-        if live and force_token is None:
-            die("run_in_progress", "exclusive lock held")
-        if live and force_token != existing.get("token"):
-            die("force_lock_required", "force token mismatch")
+    lock_path = run_dir / ".lock"
     rec = {"pid": os.getpid(), "startedAt": str(time.time()), "token": secrets.token_hex(16)}
-    (run_dir / ".lock").write_text(json.dumps(rec))
-    return rec
+    payload = json.dumps(rec).encode("utf-8")
+
+    with _dir_mutex(run_dir):
+        existing = read_lock(run_dir)
+        if existing is not None:
+            live = is_live(existing.get("pid"), helper_basename)
+            if live and force_token is None:
+                die("run_in_progress", "exclusive lock held")
+            expected_tok = existing.get("token")
+            valid_force = (
+                isinstance(expected_tok, str)
+                and bool(expected_tok)
+                and isinstance(force_token, str)
+                and bool(force_token)
+                and hmac.compare_digest(force_token, expected_tok)
+            )
+            if live and not valid_force:
+                die("force_lock_required", "force token mismatch")
+            lock_path.unlink(missing_ok=True)
+        elif lock_path.exists():
+            # Reclaim corrupt/empty/non-dict lock file safely under directory flock.
+            lock_path.unlink(missing_ok=True)
+        try:
+            _atomic_publish_lock(run_dir, lock_path, payload)
+        except FileExistsError:
+            die("run_in_progress", "exclusive lock contention")
+        return rec

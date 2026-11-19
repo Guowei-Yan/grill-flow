@@ -62,5 +62,112 @@ class TestLock(unittest.TestCase):
                         lock.acquire_exclusive(Path(td), force_token=None, helper_basename="grill-flow.py")
                 self.assertEqual(json.loads(se.getvalue())["error"], "unsupported_platform")
 
+    def test_concurrent_acquire_only_one_winner(self):
+        import threading
+        import grill_flow_lock as lock
+        with tempfile.TemporaryDirectory() as td:
+            rd = Path(td)
+            barrier = threading.Barrier(4)
+            winners = []
+            failures = []
+            mu = threading.Lock()
+
+            def worker():
+                barrier.wait()
+                try:
+                    rec = lock.acquire_exclusive(
+                        rd, force_token=None, helper_basename="grill-flow.py", is_live=lambda p, b: True
+                    )
+                    with mu:
+                        winners.append(rec)
+                except SystemExit:
+                    with mu:
+                        failures.append(1)
+
+            threads = [threading.Thread(target=worker) for _ in range(4)]
+            for t in threads:
+                t.start()
+            for t in threads:
+                t.join()
+            self.assertEqual(len(winners), 1)
+            self.assertEqual(len(failures), 3)
+            self.assertEqual(lock.read_lock(rd)["token"], winners[0]["token"])
+
+    def test_concurrent_stale_lock_takeover_preserves_winner(self):
+        import threading
+        import grill_flow_lock as lock
+        with tempfile.TemporaryDirectory() as td:
+            rd = Path(td)
+            (rd / ".lock").write_text(json.dumps({"pid": 999999, "startedAt": "t", "token": "stale"}))
+            barrier = threading.Barrier(4)
+            winners = []
+            failures = []
+            mu = threading.Lock()
+
+            def is_live(pid, _base):
+                return pid != 999999
+
+            def worker():
+                barrier.wait()
+                try:
+                    rec = lock.acquire_exclusive(
+                        rd, force_token=None, helper_basename="grill-flow.py", is_live=is_live
+                    )
+                    with mu:
+                        winners.append(rec)
+                except SystemExit:
+                    with mu:
+                        failures.append(1)
+
+            threads = [threading.Thread(target=worker) for _ in range(4)]
+            for t in threads:
+                t.start()
+            for t in threads:
+                t.join()
+            self.assertEqual(len(winners), 1)
+            self.assertEqual(len(failures), 3)
+            on_disk = lock.read_lock(rd)
+            self.assertIsNotNone(on_disk)
+            self.assertEqual(on_disk["token"], winners[0]["token"])
+
+    def test_corrupt_non_dict_and_empty_force_token_edge_cases(self):
+        import grill_flow_lock as lock
+        with tempfile.TemporaryDirectory() as td:
+            rd = Path(td)
+            # Non-dict JSON and invalid JSON must not crash and should be reclaimed
+            for raw in ("[]", '"hello"', "{bad json", ""):
+                (rd / ".lock").write_text(raw)
+                self.assertIsNone(lock.read_lock(rd))
+                rec = lock.acquire_exclusive(
+                    rd, force_token=None, helper_basename="grill-flow.py", is_live=lambda p, b: True
+                )
+                self.assertIn("token", rec)
+                lock.release_exclusive(rd)
+
+            # Empty force_token must never match a missing/empty token on a live lock
+            (rd / ".lock").write_text(json.dumps({"pid": 1, "startedAt": "t"}))
+            with self.assertRaises(SystemExit):
+                lock.acquire_exclusive(
+                    rd, force_token="", helper_basename="grill-flow.py", is_live=lambda p, b: True
+                )
+
+    def test_release_exclusive_respects_expected_token(self):
+        import grill_flow_lock as lock
+        with tempfile.TemporaryDirectory() as td:
+            rd = Path(td)
+            rec_a = lock.acquire_exclusive(
+                rd, force_token=None, helper_basename="grill-flow.py", is_live=lambda p, b: False
+            )
+            # Process B force-reclaims the lock
+            rec_b = lock.acquire_exclusive(
+                rd, force_token=rec_a["token"], helper_basename="grill-flow.py", is_live=lambda p, b: True
+            )
+            # Process A exiting with its stale token must NOT delete Process B's live lock
+            lock.release_exclusive(rd, expected_token=rec_a["token"])
+            self.assertEqual(lock.read_lock(rd)["token"], rec_b["token"])
+            # Process B releasing with its own token removes the lock
+            lock.release_exclusive(rd, expected_token=rec_b["token"])
+            self.assertIsNone(lock.read_lock(rd))
+
 if __name__ == "__main__":
     unittest.main()

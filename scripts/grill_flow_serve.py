@@ -1,3 +1,4 @@
+import hmac
 import json
 import os
 import posixpath
@@ -306,6 +307,42 @@ def serve_start(
     return info
 
 
+def _signal_process_tree(pid: int, sig: int, *, is_pgid_leader: bool | None = None) -> None:
+    if is_pgid_leader is None:
+        try:
+            is_pgid_leader = os.getpgid(pid) == pid
+        except ProcessLookupError:
+            return
+        except OSError:
+            is_pgid_leader = False
+    if is_pgid_leader:
+        try:
+            os.killpg(pid, sig)
+            return
+        except ProcessLookupError:
+            return
+        except PermissionError:
+            pass
+    try:
+        os.kill(pid, sig)
+    except ProcessLookupError:
+        pass
+
+
+def _group_alive(pid: int, is_pgid_leader: bool) -> bool:
+    if is_pgid_leader:
+        try:
+            os.killpg(pid, 0)
+            return True
+        except ProcessLookupError:
+            return False
+        except PermissionError:
+            return True
+        except OSError:
+            pass
+    return _pid_alive(pid)
+
+
 def serve_stop(run_dir: Path) -> dict:
     info = read_server_info(run_dir)
     if info is None:
@@ -317,20 +354,18 @@ def serve_stop(run_dir: Path) -> dict:
         return {}
     if _has_instance_flag(pid, instance_id):
         try:
-            os.kill(pid, signal.SIGTERM)
-        except ProcessLookupError:
-            pass
+            is_pgid_leader = os.getpgid(pid) == pid
+        except OSError:
+            is_pgid_leader = False
+        _signal_process_tree(pid, signal.SIGTERM, is_pgid_leader=is_pgid_leader)
         for _ in range(50):
-            if not _pid_alive(pid):
+            if not _group_alive(pid, is_pgid_leader):
                 break
             time.sleep(0.05)
-        if _pid_alive(pid):
-            try:
-                os.kill(pid, signal.SIGKILL)
-            except ProcessLookupError:
-                pass
+        if _group_alive(pid, is_pgid_leader):
+            _signal_process_tree(pid, signal.SIGKILL, is_pgid_leader=is_pgid_leader)
             for _ in range(20):
-                if not _pid_alive(pid):
+                if not _group_alive(pid, is_pgid_leader):
                     break
                 time.sleep(0.05)
         try:
@@ -417,7 +452,7 @@ def make_handler(
                 return True
             qs = parse_qs(parsed.query)
             tok = (qs.get("t") or [None])[0] or self.headers.get("X-Grill-Flow-Instance")
-            if tok != instance_id:
+            if not tok or not hmac.compare_digest(tok, instance_id):
                 self._unavail(403, "token", body=body)
                 return True
             rel_raw = unquote(p[len("/repo/"):])

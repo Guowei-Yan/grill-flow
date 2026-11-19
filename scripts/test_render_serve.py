@@ -205,9 +205,9 @@ class TestRender(unittest.TestCase):
             def fake_acq(rd, force_token=None):
                 acq.append(rd)
                 return real_acq(rd, force_token=force_token)
-            def fake_rel(rd):
+            def fake_rel(rd, **kwargs):
                 rel.append(rd)
-                return real_rel(rd)
+                return real_rel(rd, **kwargs)
             with mock.patch.object(mod, "acquire_exclusive", side_effect=fake_acq):
                 with mock.patch.object(mod, "release_exclusive", side_effect=fake_rel):
                     with mock.patch.object(mod, "apply_surface_drift", return_value={"changed": False}):
@@ -275,6 +275,53 @@ class TestServe(unittest.TestCase):
             finally:
                 serve_stop(run_dir)
                 self.assertFalse(_pid_alive(info["pid"]))
+
+    def test_signal_process_tree_kills_grandchild_in_process_group(self):
+        import signal
+        import subprocess
+        import time
+        from grill_flow_serve import _pid_alive, _signal_process_tree
+        with tempfile.TemporaryDirectory() as td:
+            pid_file = Path(td) / "grandchild.pid"
+            parent_code = (
+                "import subprocess, sys, time; "
+                "p = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(60)']); "
+                f"open({str(pid_file)!r}, 'w').write(str(p.pid)); "
+                "time.sleep(60)"
+            )
+            proc = subprocess.Popen(
+                [sys.executable, "-c", parent_code],
+                start_new_session=True,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+            )
+            grandchild_pid = None
+            try:
+                deadline = time.time() + 3.0
+                while time.time() < deadline:
+                    if pid_file.is_file() and pid_file.read_text().strip():
+                        grandchild_pid = int(pid_file.read_text().strip())
+                        break
+                    time.sleep(0.05)
+                self.assertIsNotNone(grandchild_pid)
+                self.assertTrue(_pid_alive(proc.pid))
+                self.assertTrue(_pid_alive(grandchild_pid))
+
+                _signal_process_tree(proc.pid, signal.SIGTERM)
+                proc.wait(timeout=3.0)
+                deadline = time.time() + 3.0
+                while time.time() < deadline and _pid_alive(grandchild_pid):
+                    time.sleep(0.05)
+                self.assertFalse(_pid_alive(grandchild_pid))
+            finally:
+                try:
+                    _signal_process_tree(proc.pid, signal.SIGKILL)
+                except Exception:
+                    pass
+                try:
+                    proc.wait(timeout=1.0)
+                except Exception:
+                    pass
 
     def test_serve_stop_missing(self):
         from grill_flow_serve import serve_stop
@@ -345,9 +392,9 @@ class TestServe(unittest.TestCase):
             def fake_acq(rd, force_token=None):
                 acq.append(("start", rd))
                 return real_acq(rd, force_token=force_token)
-            def fake_rel(rd):
+            def fake_rel(rd, **kwargs):
                 rel.append(("start", rd))
-                return real_rel(rd)
+                return real_rel(rd, **kwargs)
             with mock.patch.object(mod, "acquire_exclusive", side_effect=fake_acq):
                 with mock.patch.object(mod, "release_exclusive", side_effect=fake_rel):
                     out_buf = StringIO()
